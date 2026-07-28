@@ -188,8 +188,7 @@ class ArrayFn:
                 )
         if is_bypassed():
             return [
-                self._validate(self._fn(*args, **kwargs))
-                for args, kwargs in normalized
+                self._validate(self._fn(*args, **kwargs)) for args, kwargs in normalized
             ]
         keys = [self._key_fn(args, kwargs) for args, kwargs in normalized]
         pending: dict[str, np.ndarray] = {}

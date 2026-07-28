@@ -46,8 +46,12 @@ def test_tracked_identifies_by_tag_not_contents():
     b = np.zeros((100, 3), dtype=np.float32)
     # The whole point: contents are never read, so a tag stands in for
     # arrays too large to hash.
-    assert fingerprint(tracked(a, ("call", "x"))) == fingerprint(tracked(b, ("call", "x")))
-    assert fingerprint(tracked(a, ("call", "x"))) != fingerprint(tracked(a, ("call", "y")))
+    assert fingerprint(tracked(a, ("call", "x"))) == fingerprint(
+        tracked(b, ("call", "x"))
+    )
+    assert fingerprint(tracked(a, ("call", "x"))) != fingerprint(
+        tracked(a, ("call", "y"))
+    )
     # A tag is not the same thing as the contents it stands for.
     assert fingerprint(tracked(a, ("call", "x"))) != fingerprint(a)
     # Tags compose like any other payload, including nested in containers.

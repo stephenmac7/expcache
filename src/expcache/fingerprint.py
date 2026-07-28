@@ -113,6 +113,7 @@ class Fingerprinter:
                 return ("wavlm", enc.size, enc.layer)
         """
         if fn is None:
+
             def deco(f: Callable[[Any], Any]) -> Callable[[Any], Any]:
                 self._registry[cls] = f
                 return f

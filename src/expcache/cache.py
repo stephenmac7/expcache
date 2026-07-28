@@ -41,9 +41,7 @@ class _CallKey:
     def __call__(self, args: tuple, kwargs: dict) -> str:
         bound = self._sig.bind(*args, **kwargs)
         bound.apply_defaults()
-        payload = {
-            k: v for k, v in bound.arguments.items() if k not in self._ignore
-        }
+        payload = {k: v for k, v in bound.arguments.items() if k not in self._ignore}
         return self._fp(("call", self._name, self._version, payload))
 
 
