@@ -135,3 +135,47 @@ def test_clear(tmp_path):
     encode.clear()
     np.testing.assert_array_equal(encode("a", 5)[:, 0], np.arange(5) + 5.0)
     assert calls == ["a", "a"]
+
+
+def test_results_carry_provenance(tmp_path):
+    from expcache import fingerprint
+
+    cache = Cache(tmp_path)
+    calls = []
+    encode = make_encode(cache, calls)
+
+    miss = encode("a", 5)
+    hit = encode("a", 5)
+    # A miss and a hit for the same call are interchangeable as cache-key
+    # arguments, even though one is fresh memory and one is a memmap view.
+    assert fingerprint(miss) == fingerprint(hit)
+    assert fingerprint(encode("b", 5)) != fingerprint(miss)
+    # Provenance follows the call, not the contents: "b" and "c" here
+    # produce identical arrays but must not share downstream keys.
+    np.testing.assert_array_equal(encode("b", 5), encode("c", 5))
+    assert fingerprint(encode("b", 5)) != fingerprint(encode("c", 5))
+    assert fingerprint(encode.batch([("a", 5)])[0]) == fingerprint(miss)
+
+
+def test_provenance_survives_version_and_root_moves(tmp_path):
+    from expcache import fingerprint
+
+    first = make_encode(Cache(tmp_path / "one"), [])("a", 5)
+    # Same call, same version, a different cache root: relocating a cache
+    # must not invalidate keys derived from what it holds.
+    assert fingerprint(make_encode(Cache(tmp_path / "two"), [])("a", 5)) == fingerprint(
+        first
+    )
+    bumped = make_encode(Cache(tmp_path / "three"), [], version=2)("a", 5)
+    assert fingerprint(bumped) != fingerprint(first)
+
+
+def test_no_cache_results_are_untagged(tmp_path):
+    from expcache import fingerprint, no_cache
+
+    encode = make_encode(Cache(tmp_path), [])
+    with no_cache():
+        bypassed = encode("a", 5)
+    # No key exists inside no_cache(), so results fall back to contents.
+    assert fingerprint(bypassed) == fingerprint(np.asarray(bypassed))
+    assert fingerprint(bypassed) != fingerprint(encode("a", 5))

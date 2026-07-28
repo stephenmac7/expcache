@@ -1,9 +1,10 @@
+import pickle
 from pathlib import Path
 
 import numpy as np
 import pytest
 
-from expcache import Fingerprinter, file_tag, fingerprint
+from expcache import Fingerprinter, file_tag, fingerprint, tracked
 
 
 def test_primitives_stable_and_distinct():
@@ -38,6 +39,64 @@ def test_ndarray():
     assert fingerprint(a.T) == fingerprint(np.ascontiguousarray(a.T))
     assert fingerprint(np.float32(1.5)) == fingerprint(np.float32(1.5))
     assert fingerprint(np.float32(1.5)) != fingerprint(np.float64(1.5))
+
+
+def test_tracked_identifies_by_tag_not_contents():
+    a = np.arange(6, dtype=np.float32).reshape(2, 3)
+    b = np.zeros((100, 3), dtype=np.float32)
+    # The whole point: contents are never read, so a tag stands in for
+    # arrays too large to hash.
+    assert fingerprint(tracked(a, ("call", "x"))) == fingerprint(tracked(b, ("call", "x")))
+    assert fingerprint(tracked(a, ("call", "x"))) != fingerprint(tracked(a, ("call", "y")))
+    # A tag is not the same thing as the contents it stands for.
+    assert fingerprint(tracked(a, ("call", "x"))) != fingerprint(a)
+    # Tags compose like any other payload, including nested in containers.
+    assert fingerprint({"f": tracked(a, ("call", "x"))}) == fingerprint(
+        {"f": tracked(b, ("call", "x"))}
+    )
+
+
+def test_tracked_arrays_are_read_only():
+    t = tracked(np.arange(4, dtype=np.float32), ("call", "x"))
+    with pytest.raises(ValueError):
+        t[0] = 1.0
+    with pytest.raises(ValueError, match="provenance"):
+        tracked(np.arange(4), None)
+
+
+def test_derived_arrays_drop_the_tag():
+    a = np.arange(6, dtype=np.float32).reshape(2, 3)
+    t = tracked(a, ("call", "x"))
+    # Anything whose bytes are no longer the tagged result falls back to
+    # hashing contents, so a tag can never outlive its truth.
+    for derived in (t[1:], t + 1, t.reshape(3, 2), t.astype(np.float64), t.T):
+        assert fingerprint(derived) == fingerprint(np.asarray(derived))
+    # A no-op astype returns the array itself, so the tag survives.
+    assert t.astype(np.float32, copy=False) is t
+
+
+def test_tracked_survives_pickling():
+    t = tracked(np.arange(6, dtype=np.float32), ("call", "x"))
+    restored = pickle.loads(pickle.dumps(t))
+    assert fingerprint(restored) == fingerprint(t)
+    np.testing.assert_array_equal(restored, t)
+
+
+def test_torch_tensors():
+    torch = pytest.importorskip("torch")
+    a = torch.arange(6, dtype=torch.float32).reshape(2, 3)
+    assert fingerprint(a) == fingerprint(a.clone())
+    assert fingerprint(a) != fingerprint(a + 1)
+    assert fingerprint(a) != fingerprint(a.reshape(3, 2))
+    assert fingerprint(a) != fingerprint(a.to(torch.float64))
+    # A tensor is not its numpy equivalent.
+    assert fingerprint(a) != fingerprint(a.numpy())
+    # Layout, autograd, and device are not part of the identity.
+    assert fingerprint(a.T) == fingerprint(a.T.contiguous())
+    assert fingerprint(torch.ones(3, requires_grad=True)) == fingerprint(torch.ones(3))
+    # State dicts compose through the dict branch.
+    layer = torch.nn.Linear(3, 2)
+    assert fingerprint(layer.state_dict()) == fingerprint(layer.state_dict())
 
 
 def test_path_resolution(tmp_path):

@@ -20,6 +20,17 @@ import diskcache
 import numpy as np
 
 from .bypass import is_bypassed
+from .fingerprint import tracked
+
+
+def _provenance(key: str) -> tuple:
+    """Provenance tag for a cached result.
+
+    The call key already encodes the cache name, version, and arguments,
+    and the cache root is deliberately left out: relocating a cache
+    directory must not invalidate keys derived from what it holds.
+    """
+    return ("expcache/arrays", key)
 
 
 class ArrayStore:
@@ -119,6 +130,11 @@ class ArrayFn:
 
     Results are read-only — hits are zero-copy views into a shard memory
     map, misses return the freshly computed array; copy before mutating.
+
+    Results also carry their call key as provenance, so passing one to
+    another cached function keys on "what produced this array" rather
+    than on gigabytes of contents. Inside ``no_cache()`` there is no key,
+    so results come back untagged and hash by content.
     """
 
     def __init__(
@@ -145,15 +161,13 @@ class ArrayFn:
         key = self._key_fn(args, kwargs)
         if key in self.store:
             self.hits += 1
-            return self.store.get(key)
+            return tracked(self.store.get(key), _provenance(key))
         value = self._validate(self._fn(*args, **kwargs))
         self.store.put_many([(key, value)])
         self.misses += 1
         # Returning the in-memory result (not store.get) keeps cold-loop
         # reads from remapping the shard once per appended entry.
-        view = value.view()
-        view.setflags(write=False)
-        return view
+        return tracked(value, _provenance(key))
 
     def batch(self, calls: Iterable[tuple | dict]) -> list[np.ndarray]:
         """Compute or fetch many calls, appending all misses in one write.
@@ -186,7 +200,7 @@ class ArrayFn:
                 pending[key] = self._validate(self._fn(*args, **kwargs))
                 self.misses += 1
         self.store.put_many(list(pending.items()))
-        return [self.store.get(key) for key in keys]
+        return [tracked(self.store.get(key), _provenance(key)) for key in keys]
 
     def clear(self) -> None:
         """Delete every stored entry for this function."""

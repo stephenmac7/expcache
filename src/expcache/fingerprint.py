@@ -2,24 +2,100 @@
 
 A fingerprint is a hex digest identifying an object for cache-key
 purposes. Built-in support covers primitives, containers, numpy arrays,
-and paths. Other types opt in by defining ``__fingerprint__`` (returning
-any fingerprintable value) or by registering a handler with
-``fingerprint.register``. Unknown types raise TypeError rather than
-being pickled blindly.
+paths, and torch tensors. Other types opt in by defining
+``__fingerprint__`` (returning any fingerprintable value) or by
+registering a handler with ``fingerprint.register``. Unknown types raise
+TypeError rather than being pickled blindly.
+
+Arrays carrying a provenance tag (see ``tracked``) are identified by that
+tag rather than by their contents, so a cached corpus can be a cache-key
+argument without being hashed byte by byte.
 """
 
 from __future__ import annotations
 
 import hashlib
 import struct
+import sys
 from pathlib import Path, PurePath
 from typing import Any, Callable
 
 import numpy as np
 
+#: Attribute holding an array's provenance tag. Any ndarray subclass may
+#: set it; ``None`` means "identify me by my contents".
+PROVENANCE_ATTR = "expcache_provenance"
+
 
 def _pack_len(n: int) -> bytes:
     return struct.pack("<Q", n)
+
+
+class TrackedArray(np.ndarray):
+    """A numpy array that remembers which cached call produced it.
+
+    Fingerprinting one hashes its provenance tag instead of its bytes,
+    which is what makes a multi-gigabyte cached corpus usable as a
+    cache-key argument.
+
+    Any array *derived* from a tracked one -- a slice, a ufunc result, a
+    reshape, an ``astype`` that actually converts -- drops the tag and
+    falls back to hashing contents, because its bytes are no longer what
+    the tagged call returned. Only an untouched result stays tagged.
+    """
+
+    def __array_finalize__(self, obj: Any) -> None:
+        # Runs for every array built from this one as a template. The tag
+        # is never inherited; ``tracked`` re-applies it explicitly.
+        setattr(self, PROVENANCE_ATTR, None)
+
+    def __reduce__(self):
+        fn, args, state = super().__reduce__()
+        return fn, args, (state, getattr(self, PROVENANCE_ATTR, None))
+
+    def __setstate__(self, state):
+        base, provenance = state
+        super().__setstate__(base)
+        setattr(self, PROVENANCE_ATTR, provenance)
+
+
+def tracked(array: np.ndarray, provenance: Any) -> TrackedArray:
+    """Return a read-only view of ``array`` tagged with ``provenance``.
+
+    ``provenance`` must itself be fingerprintable, and must identify the
+    contents *completely*: two arrays sharing a tag are treated as equal
+    by every cache key that sees them. A cached call's key is the natural
+    tag; anything weaker silently conflates results.
+    """
+    if provenance is None:
+        raise ValueError("provenance must not be None")
+    view = array.view(TrackedArray)
+    setattr(view, PROVENANCE_ATTR, provenance)
+    view.setflags(write=False)
+    return view
+
+
+def _is_torch_tensor(obj: Any) -> bool:
+    # If torch was never imported, obj cannot be a tensor -- so this stays
+    # a soft dependency.
+    torch = sys.modules.get("torch")
+    return torch is not None and isinstance(obj, torch.Tensor)
+
+
+def _torch_payload(obj: Any) -> tuple:
+    """Identity of a tensor: its dtype, shape, and bytes.
+
+    Device and ``requires_grad`` are deliberately excluded -- the same
+    weights on CPU and GPU are the same weights.
+    """
+    torch = sys.modules["torch"]
+    tensor = obj.detach().cpu().contiguous()
+    try:
+        data = tensor.numpy()
+    except TypeError:
+        # dtypes numpy has no equivalent for (bfloat16, the float8s).
+        data = tensor.view(torch.uint8).numpy()
+    return ("torch.Tensor", str(tensor.dtype), tuple(tensor.shape), data)
 
 
 class Fingerprinter:
@@ -84,6 +160,11 @@ class Fingerprinter:
             data = str(Path(obj).resolve()).encode()
             h.update(b"pth:" + _pack_len(len(data)) + data)
         elif isinstance(obj, np.ndarray):
+            provenance = getattr(obj, PROVENANCE_ATTR, None)
+            if provenance is not None:
+                h.update(b"prv:")
+                self._feed(h, provenance)
+                return
             arr = np.ascontiguousarray(obj)
             dt = arr.dtype.str.encode()
             h.update(b"arr:" + _pack_len(len(dt)) + dt)
@@ -110,6 +191,8 @@ class Fingerprinter:
             h.update(b"set:" + _pack_len(len(digests)))
             for d in digests:
                 h.update(d.encode())
+        elif _is_torch_tensor(obj):
+            self._feed(h, _torch_payload(obj))
         else:
             raise TypeError(
                 f"Cannot fingerprint object of type {tp.__module__}.{tp.__qualname__}. "

@@ -15,7 +15,13 @@ cache = Cache("~/.cache/my-project")
 
 `fingerprint(obj)` maps an object to a stable hex digest. Primitives,
 tuples/lists, dicts, sets, `Path`s (by resolved location), numpy arrays
-(by dtype/shape/contents), and numpy dtypes work out of the box.
+(by dtype/shape/contents), numpy dtypes, and torch tensors work out of
+the box. Tensors are identified by dtype, shape, and contents — device,
+layout, and `requires_grad` are excluded, so the same weights on CPU and
+GPU fingerprint alike, and a `state_dict` composes through the dict
+branch. Torch is a soft dependency: if it was never imported, nothing
+here touches it.
+
 **Unknown types raise `TypeError`** instead of being pickled blindly —
 teach the fingerprinter about your types one of two ways:
 
@@ -70,6 +76,37 @@ all_feats = wavlm_feats.batch(                                 # one index write
 
 `batch()` takes tuples (positional args) or dicts (kwargs) and returns
 results in order. Copy before mutating a hit — views are read-only.
+
+## Provenance: caching functions of cached things
+
+Results from `arrays()` remember the call that produced them, so they
+can be *arguments* to another cached function without being hashed:
+
+```python
+@cache.memo(version=1)
+def train(corpus, seed):        # corpus is 12 GiB of cached features
+    ...
+
+train([wavlm_feats(enc, u.key, u.loader) for u in utterances], seed=0)
+```
+
+The key here costs a few hundred bytes of hashing, not 12 GiB, because
+each array fingerprints as *"the result of `wavlm_feats` v1 on this
+utterance"* rather than as its bytes. The tag omits the cache root, so
+relocating a cache directory doesn't invalidate anything derived from it.
+
+Any array derived from a tagged one — a slice, a ufunc result, a
+reshape, an `astype` that actually converts — silently drops the tag and
+falls back to hashing contents, so a tag can never outlive its truth.
+Inside `no_cache()` there is no key, so results come back untagged too.
+
+Use `tracked(array, provenance)` to tag arrays from elsewhere. The tag
+must identify the contents *completely* — two arrays sharing a tag are
+treated as equal by every key that sees them:
+
+```python
+feats = tracked(np.load(path), ("corpus-v3", file_tag(path)))
+```
 
 ## Keys, versions, ignore
 

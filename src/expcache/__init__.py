@@ -10,10 +10,30 @@ Keys are built from explicit versions plus argument fingerprints; teach
 the fingerprinter about your own types via ``__fingerprint__`` or
 ``fingerprint.register``. Code is never hashed — bump ``version=`` to
 invalidate.
+
+Results from ``Cache.arrays`` carry their call key as provenance, so
+they can be passed to another cached function without being hashed;
+``tracked`` applies the same treatment to arrays from elsewhere.
 """
 
 from .bypass import no_cache
 from .cache import Cache
-from .fingerprint import Fingerprinter, file_tag, fingerprint
+from .fingerprint import (
+    PROVENANCE_ATTR,
+    Fingerprinter,
+    TrackedArray,
+    file_tag,
+    fingerprint,
+    tracked,
+)
 
-__all__ = ["Cache", "Fingerprinter", "file_tag", "fingerprint", "no_cache"]
+__all__ = [
+    "PROVENANCE_ATTR",
+    "Cache",
+    "Fingerprinter",
+    "TrackedArray",
+    "file_tag",
+    "fingerprint",
+    "no_cache",
+    "tracked",
+]
