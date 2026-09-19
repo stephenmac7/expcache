@@ -25,6 +25,14 @@ def test_containers():
     assert fingerprint({1, 2, 3}) == fingerprint({3, 2, 1})
     # Nesting doesn't flatten ambiguously.
     assert fingerprint([[1], [2]]) != fingerprint([[1, 2]])
+    assert fingerprint([[1], 2]) != fingerprint([[1, 2]])
+
+
+def test_items_cannot_borrow_each_other_s_content():
+    """Check framing with payloads containing the encoding's type tags."""
+    assert fingerprint(["", "str:"]) != fingerprint(["str:", ""])
+    assert fingerprint(["a", "str:b"]) != fingerprint(["astr:", "b"])
+    assert fingerprint([b"", b"byt:"]) != fingerprint([b"byt:", b""])
 
 
 def test_ndarray():

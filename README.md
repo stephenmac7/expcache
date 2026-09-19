@@ -15,7 +15,7 @@ cache = Cache("~/.cache/my-project")
 ## Choose a cache
 
 Use `memo()` for picklable results. Each call is stored in a SQLite-backed
-[diskcache](https://grantjenks.com/docs/diskcache/) index with no eviction.
+[diskcache](https://grantjenks.com/docs/diskcache/) store with no eviction.
 
 ```python
 @cache.memo(version=1)
@@ -128,8 +128,19 @@ The array store supports concurrent readers but only one writer. Shards are
 append-only, so entries invalidated by a version bump keep using disk space
 until you call `.clear()`.
 
+## Crash recovery
+
+Array stores check shard sizes on open and discard entries past the end of
+missing or truncated files. Memo entries that fail to deserialize are discarded
+on read. Discarded entries emit `CacheRepairWarning` and recompute on demand.
+Missing memo files are already treated as misses by diskcache.
+
+Recovery does not validate contents: same-size corruption and truncated raw
+memo bytes or strings can go undetected. Cache writes are not guaranteed to
+survive machine failure.
+
 ## Development
 
 ```sh
-uv run --with pytest pytest
+uv run pytest
 ```

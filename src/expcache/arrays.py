@@ -7,7 +7,7 @@ memory map, so loading a whole corpus of cached features is one
 sequential mmap rather than per-entry deserialization.
 
 Single-writer: concurrent writes from multiple processes are not
-supported.
+supported. Opening a store repairs missing or truncated shards.
 """
 
 from __future__ import annotations
@@ -21,6 +21,7 @@ import numpy as np
 
 from .bypass import is_bypassed
 from .fingerprint import tracked
+from .repair import warn_dropped
 
 
 def _provenance(key: str) -> tuple:
@@ -46,6 +47,46 @@ class ArrayStore:
             kind, _, name = key.partition(":")
             assert kind in ("s", "e"), key
             (self._shards if kind == "s" else self._entries)[name] = value
+        self._repair()
+
+    def _repair(self) -> list[str]:
+        """Drop entries past EOF and commit their removal with the reduced row counts."""
+        dropped: list[str] = []
+        clamped: list[str] = []
+        for shard, meta in self._shards.items():
+            rowbytes = np.dtype(meta["dtype"]).itemsize * math.prod(meta["trailing"])
+            if not rowbytes:  # zero-width rows; nothing to check a size against
+                continue
+            try:
+                stored = (self._dir / f"{shard}.bin").stat().st_size
+            except FileNotFoundError:
+                stored = 0
+            intact = stored // rowbytes
+            if intact >= meta["rows"]:
+                continue
+            dropped += [
+                key
+                for key, (name, _start, stop) in self._entries.items()
+                if name == shard and stop > intact
+            ]
+            meta["rows"] = intact
+            clamped.append(shard)
+        for key in dropped:
+            del self._entries[key]
+        if clamped:
+            # pop() rather than del: a second process repairing the same
+            # damage finds these rows already gone.
+            with self._index.transact():
+                for key in dropped:
+                    self._index.pop(f"e:{key}", None)
+                for shard in clamped:
+                    self._index[f"s:{shard}"] = self._shards[shard]
+        if dropped:
+            warn_dropped(
+                f"{self._dir}: dropped {len(dropped)} cached arrays whose shard "
+                "data is missing; they will be recomputed."
+            )
+        return dropped
 
     def __contains__(self, key: str) -> bool:
         return key in self._entries
@@ -56,8 +97,12 @@ class ArrayStore:
     def get(self, key: str) -> np.ndarray:
         shard, start, stop = self._entries[key]
         meta = self._shards[shard]
-        if start == stop:
-            return np.empty((0, *meta["trailing"]), dtype=np.dtype(meta["dtype"]))
+        # No bytes to map: either no rows, or rows of zero width (a trailing
+        # axis of length 0). Both are fully described by their shape.
+        if start == stop or 0 in meta["trailing"]:
+            return np.empty(
+                (stop - start, *meta["trailing"]), dtype=np.dtype(meta["dtype"])
+            )
         return self._mmap(shard, stop)[start:stop]
 
     def put_many(self, items: Sequence[tuple[str, np.ndarray]]) -> None:
@@ -81,8 +126,7 @@ class ArrayStore:
                         f.write(arr.reshape(-1).data)
                         meta["rows"] = start + value.shape[0]
                     self._entries[key] = [shard, start, meta["rows"]]
-        # Index commit comes after the byte writes: a crash in between
-        # leaves orphaned tail rows that the next append overwrites.
+        # Uncommitted tail bytes are overwritten by the next append.
         with self._index.transact():
             for key, _ in items:
                 self._index[f"e:{key}"] = self._entries[key]
